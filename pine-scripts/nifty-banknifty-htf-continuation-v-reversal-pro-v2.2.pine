@@ -1,0 +1,672 @@
+//@version=6
+indicator("SN Index Options/Futures HTF Continuation + V Reversal PRO v2.2", overlay=true, max_labels_count=500, max_lines_count=500)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// GROUPS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+groupMode    = "00. Mode Selection"
+groupCore    = "01. Core Trend Engine"
+groupVRev    = "02. V-Shaped Reversal Entry Block"
+groupSession = "03. NSE Intraday Session + Hard Gates"
+groupRisk    = "04. Protection / Exit Engine"
+groupFilter  = "05. Sideways Filter"
+groupVisual  = "06. Visuals"
+groupAlert   = "07. AlgoTest Alerts"
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MODE SELECTION
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+assetMode   = input.string("NIFTY", "Asset Mode", options=["NIFTY", "BANKNIFTY"], group=groupMode)
+productMode = input.string("OPTIONS", "Product Mode", options=["OPTIONS", "FUTURES"], group=groupMode)
+
+isNifty     = assetMode == "NIFTY"
+isBankNifty = assetMode == "BANKNIFTY"
+isOptions   = productMode == "OPTIONS"
+isFutures   = productMode == "FUTURES"
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// AUTO 3m / 5m PARAMETER ENGINE
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+is3m = timeframe.isminutes and timeframe.multiplier == 3
+is5m = timeframe.isminutes and timeframe.multiplier == 5
+
+autoAdxMin        = isNifty ? (is3m ? 19.0 : 18.0) : (is3m ? 21.0 : 20.0)
+autoRsiBull       = isNifty ? (is3m ? 54.0 : 55.0) : 55.0
+autoRsiBear       = isNifty ? (is3m ? 46.0 : 45.0) : 45.0
+autoMinSepPts     = isNifty ? (is3m ? 1.2 : 1.5) : (is3m ? 3.0 : 4.0)
+autoSlopeMinPts   = isNifty ? (is3m ? 0.04 : 0.05) : (is3m ? 0.12 : 0.15)
+autoProfitTrigger = isNifty ? (is3m ? 12.0 : 14.0) : (is3m ? 35.0 : 45.0)
+autoMaxLossPts    = isNifty ? (is3m ? 28.0 : 35.0) : (is3m ? 70.0 : 90.0)
+autoBbSqueeze     = isNifty ? (is3m ? 0.38 : 0.45) : (is3m ? 0.32 : 0.40)
+autoEmaFlatAtr    = isNifty ? (is3m ? 0.16 : 0.18) : (is3m ? 0.14 : 0.16)
+autoSlAtrMult     = isNifty ? 1.30 : 1.45
+autoBulgeAtrMult  = isNifty ? 0.75 : 0.85
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CORE SETTINGS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+fastLen      = input.int(9, "LTF Fast EMA", minval=1, group=groupCore)
+slowLen      = input.int(21, "LTF Slow EMA", minval=1, group=groupCore)
+htfTf        = input.timeframe("15", "HTF Bias Timeframe", group=groupCore)
+htfLen       = input.int(21, "HTF EMA Length", minval=1, group=groupCore)
+
+adxLen       = input.int(14, "ADX Length", minval=2, group=groupCore)
+adxMin       = input.float(18.0, "Manual Minimum ADX", step=0.5, group=groupCore)
+
+rsiLen       = input.int(14, "RSI Length", minval=2, group=groupCore)
+rsiBull      = input.float(55.0, "Manual RSI Bull Level", step=0.5, group=groupCore)
+rsiBear      = input.float(45.0, "Manual RSI Bear Level", step=0.5, group=groupCore)
+
+useAutoParams = input.bool(true, "Use Auto NIFTY/BANKNIFTY 3m/5m Parameters", group=groupCore)
+
+minSepPts    = input.float(1.5, "Manual Minimum EMA9/21 Separation Points", step=0.5, group=groupCore)
+slopeBars    = input.int(2, "EMA Slope Confirmation Bars", minval=1, maxval=5, group=groupCore)
+slopeMinPts  = input.float(0.05, "Manual Minimum EMA Slope Points", step=0.01, group=groupCore)
+
+useStructureBreak = input.bool(true, "Use Structure Break Confirmation", group=groupCore)
+structureLookback = input.int(5, "Structure Lookback", minval=3, maxval=20, group=groupCore)
+
+useRegularEmaReversal = input.bool(true, "Use Regular EMA9/21 Reversal Entry", group=groupCore)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// V-REVERSAL SETTINGS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+useVReversalEntry = input.bool(true, "Use V-Shaped Reversal Early Entry", group=groupVRev)
+
+vLookback         = input.int(5, "V Reversal Swing Lookback", minval=3, maxval=20, group=groupVRev)
+vBodyAtrMult      = input.float(0.55, "Displacement Body ATR Multiplier", step=0.05, group=groupVRev)
+vWickRatio        = input.float(0.35, "Minimum Rejection Wick Ratio", step=0.05, group=groupVRev)
+vAdxFloor         = input.float(14.0, "Minimum ADX Floor for V Entry", step=0.5, group=groupVRev)
+vRsiBullRecover   = input.float(48.0, "Bullish V RSI Recovery Level", step=0.5, group=groupVRev)
+vRsiBearReject    = input.float(52.0, "Bearish V RSI Rejection Level", step=0.5, group=groupVRev)
+
+allowVAgainstHTF  = input.bool(false, "Allow V Entry Against HTF Bias", group=groupVRev)
+requireVCloseEma  = input.bool(true, "V Entry Must Reclaim/Lose EMA9", group=groupVRev)
+showVSignals      = input.bool(true, "Show V Entry Markers", group=groupVRev)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SESSION + HARD GATES v2.2
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+tz               = "Asia/Kolkata"
+useSessionFilter = input.bool(true, "Use NSE Session Filter", group=groupSession)
+entrySession     = input.session("0935-1505", "Entry Session - Live Safe Default", group=groupSession)
+forceExitSession = input.session("1510-1515", "Force Exit Session", group=groupSession)
+resetSession     = input.session("0915-0916", "Daily Reset Window", group=groupSession)
+
+maxTradesPerDay      = input.int(3, "Hard Lock: Max Trades Per Day", minval=1, maxval=10, group=groupSession)
+minBarsBetweenTrades = input.int(6, "Hard Lock: Minimum Bars Between Entries", minval=0, maxval=50, group=groupSession)
+cooldownBarsAfterExit = input.int(2, "Hard Lock: Cooldown Bars After Exit", minval=0, maxval=20, group=groupSession)
+maxVEntriesPerSide   = input.int(1, "Hard Lock: Max V Entries Per Side Per Day", minval=0, maxval=5, group=groupSession)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// RISK / EXIT SETTINGS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+atrLen             = input.int(14, "ATR Length", minval=1, group=groupRisk)
+slAtrMultManual    = input.float(1.30, "Manual Initial ATR Hard SL Multiplier", step=0.05, group=groupRisk)
+
+profitTriggerPtsInput = input.float(14.0, "Manual Protection Marker Trigger Points", step=0.5, group=groupRisk)
+maxCloseLossPtsInput  = input.float(35.0, "Manual Emergency Max Close Loss Points", step=0.5, group=groupRisk)
+
+useHtfContinuationHold = input.bool(true, "Hold During HTF Continuation", group=groupRisk)
+
+// Full-term pregnancy bulge exit settings
+useBulgeExit      = input.bool(true, "Use Full-Term Pregnancy Bulge Exit After Protection", group=groupRisk)
+bulgeAtrMultManual = input.float(0.75, "Manual Minimum Full-Term Bulge Size vs ATR", step=0.05, group=groupRisk)
+bulgeConfirmBars  = input.int(1, "Bulge Contraction Confirmation Bars", minval=1, maxval=5, group=groupRisk)
+bulgeUseEma9Close = input.bool(false, "Require Close Against EMA9 for Bulge Exit", group=groupRisk)
+showBulgeExitMark = input.bool(true, "Show Bulge Exit Marker", group=groupRisk)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SIDEWAYS FILTER
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+useChopFilter   = input.bool(true, "Use Sideways / Chop Filter", group=groupFilter)
+bbLen           = input.int(20, "BB Length", group=groupFilter)
+bbMult          = input.float(2.0, "BB Multiplier", step=0.1, group=groupFilter)
+bbSqueezeInput  = input.float(0.45, "Manual BB Squeeze % Threshold", step=0.05, group=groupFilter)
+adxWeak         = input.float(15.0, "ADX Weak Level", step=0.5, group=groupFilter)
+emaFlatAtrInput = input.float(0.18, "Manual EMA Flatness ATR Multiplier", step=0.01, group=groupFilter)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// VISUALS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+showEma       = input.bool(true, "Show EMA Lines", group=groupVisual)
+showDashboard = input.bool(true, "Show Dashboard", group=groupVisual)
+showChopBg    = input.bool(true, "Show Chop Background", group=groupVisual)
+showHoldDots  = input.bool(true, "Show HTF Hold Dots", group=groupVisual)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ALGOTEST ALERT MESSAGES
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+buyCeMsg  = input.string("BUY CE", "BUY CE Message", group=groupAlert)
+exitCeMsg = input.string("EXIT CE", "EXIT CE Message", group=groupAlert)
+buyPeMsg  = input.string("BUY PE", "BUY PE Message", group=groupAlert)
+exitPeMsg = input.string("EXIT PE", "EXIT PE Message", group=groupAlert)
+
+buyFutureMsg      = input.string("BUY FUTURE", "BUY FUTURE Message", group=groupAlert)
+exitBuyFutureMsg  = input.string("EXIT BUY FUTURE", "EXIT BUY FUTURE Message", group=groupAlert)
+sellFutureMsg     = input.string("SELL FUTURE", "SELL FUTURE Message", group=groupAlert)
+exitSellFutureMsg = input.string("EXIT SELL FUTURE", "EXIT SELL FUTURE Message", group=groupAlert)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// FINAL AUTO PARAMETERS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+finalAdxMin        = useAutoParams ? autoAdxMin : adxMin
+finalRsiBull       = useAutoParams ? autoRsiBull : rsiBull
+finalRsiBear       = useAutoParams ? autoRsiBear : rsiBear
+finalMinSepPts     = useAutoParams ? autoMinSepPts : minSepPts
+finalSlopeMinPts   = useAutoParams ? autoSlopeMinPts : slopeMinPts
+finalProfitTrigger = useAutoParams ? autoProfitTrigger : profitTriggerPtsInput
+finalMaxLossPts    = useAutoParams ? autoMaxLossPts : maxCloseLossPtsInput
+finalBbSqueeze     = useAutoParams ? autoBbSqueeze : bbSqueezeInput
+finalEmaFlatAtr    = useAutoParams ? autoEmaFlatAtr : emaFlatAtrInput
+finalSlAtrMult     = useAutoParams ? autoSlAtrMult : slAtrMultManual
+finalBulgeAtrMult  = useAutoParams ? autoBulgeAtrMult : bulgeAtrMultManual
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// FUNCTIONS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+strictUp(src, bars, stepPts) =>
+    bool ok = true
+    for i = 0 to bars - 1
+        ok := ok and src[i] > src[i + 1] + stepPts
+    ok
+
+strictDown(src, bars, stepPts) =>
+    bool ok = true
+    for i = 0 to bars - 1
+        ok := ok and src[i] < src[i + 1] - stepPts
+    ok
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SESSION
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+inEntry     = not na(time(timeframe.period, entrySession, tz))
+inForceExit = not na(time(timeframe.period, forceExitSession, tz))
+inReset     = not na(time(timeframe.period, resetSession, tz))
+newDay      = ta.change(time("D")) != 0
+sessionOk   = not useSessionFilter or inEntry
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CORE CALCULATIONS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+atrVal  = ta.atr(atrLen)
+rsiVal  = ta.rsi(close, rsiLen)
+[plusDI, minusDI, adxVal] = ta.dmi(adxLen, adxLen)
+
+htfEma = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfLen), barmerge.gaps_off, barmerge.lookahead_off)
+htfSlope = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfLen) - ta.ema(close, htfLen)[1], barmerge.gaps_off, barmerge.lookahead_off)
+
+htfBull = close > htfEma and htfSlope > 0
+htfBear = close < htfEma and htfSlope < 0
+
+emaFastUp   = strictUp(emaFast, slopeBars, finalSlopeMinPts)
+emaSlowUp   = strictUp(emaSlow, slopeBars, finalSlopeMinPts)
+emaFastDown = strictDown(emaFast, slopeBars, finalSlopeMinPts)
+emaSlowDown = strictDown(emaSlow, slopeBars, finalSlopeMinPts)
+
+emaSep = emaFast - emaSlow
+bullSepOk = emaSep > finalMinSepPts and emaSep > emaSep[1]
+bearSepOk = emaSep < -finalMinSepPts and emaSep < emaSep[1]
+
+recentHigh = ta.highest(high[1], structureLookback)
+recentLow  = ta.lowest(low[1], structureLookback)
+
+structureBull = not useStructureBreak or close > recentHigh
+structureBear = not useStructureBreak or close < recentLow
+
+bullTrend = close > emaFast and emaFast > emaSlow and close > htfEma and htfBull
+bearTrend = close < emaFast and emaFast < emaSlow and close < htfEma and htfBear
+
+bullMomentum = rsiVal > finalRsiBull and adxVal >= finalAdxMin and plusDI > minusDI
+bearMomentum = rsiVal < finalRsiBear and adxVal >= finalAdxMin and minusDI > plusDI
+
+regularLongRaw =
+     bullTrend and
+     bullMomentum and
+     emaFastUp and
+     emaSlowUp and
+     bullSepOk and
+     structureBull
+
+regularShortRaw =
+     bearTrend and
+     bearMomentum and
+     emaFastDown and
+     emaSlowDown and
+     bearSepOk and
+     structureBear
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// REGULAR EMA9/21 REVERSAL ENTRY BLOCK
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+emaBullCross = ta.crossover(emaFast, emaSlow)
+emaBearCross = ta.crossunder(emaFast, emaSlow)
+
+regularEmaBullReversal =
+     useRegularEmaReversal and
+     emaBullCross and
+     close > emaFast and
+     rsiVal > 50 and
+     plusDI > minusDI and
+     adxVal >= vAdxFloor
+
+regularEmaBearReversal =
+     useRegularEmaReversal and
+     emaBearCross and
+     close < emaFast and
+     rsiVal < 50 and
+     minusDI > plusDI and
+     adxVal >= vAdxFloor
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// V-SHAPED REVERSAL ENTRY BLOCK
+// v2.2 default: V against HTF is OFF.
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+bodySize  = math.abs(close - open)
+fullRange = high - low
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+
+bodyStrong = bodySize >= atrVal * vBodyAtrMult
+rangeOk    = fullRange > 0
+
+lowerReject = rangeOk and lowerWick / fullRange >= vWickRatio
+upperReject = rangeOk and upperWick / fullRange >= vWickRatio
+
+nearSwingLow  = low <= ta.lowest(low[1], vLookback)
+nearSwingHigh = high >= ta.highest(high[1], vLookback)
+
+bullDisplacement = close > open and bodyStrong and close > high[1]
+bearDisplacement = close < open and bodyStrong and close < low[1]
+
+bullEmaReclaim = requireVCloseEma ? close > emaFast : close > close[1]
+bearEmaLose    = requireVCloseEma ? close < emaFast : close < close[1]
+
+plusDIRising  = plusDI > plusDI[1]
+minusDIRising = minusDI > minusDI[1]
+
+vBullHtfAllowed = allowVAgainstHTF ? (htfBull or close > htfEma) : htfBull
+vBearHtfAllowed = allowVAgainstHTF ? (htfBear or close < htfEma) : htfBear
+
+vBullEntryRaw =
+     useVReversalEntry and
+     nearSwingLow and
+     lowerReject and
+     bullDisplacement and
+     bullEmaReclaim and
+     rsiVal >= vRsiBullRecover and
+     plusDIRising and
+     adxVal >= vAdxFloor and
+     vBullHtfAllowed
+
+vBearEntryRaw =
+     useVReversalEntry and
+     nearSwingHigh and
+     upperReject and
+     bearDisplacement and
+     bearEmaLose and
+     rsiVal <= vRsiBearReject and
+     minusDIRising and
+     adxVal >= vAdxFloor and
+     vBearHtfAllowed
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SIDEWAYS FILTER
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+bbBasis = ta.sma(close, bbLen)
+bbDev   = bbMult * ta.stdev(close, bbLen)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+bbWidthPct = bbBasis != 0 ? ((bbUpper - bbLower) / bbBasis) * 100 : 0.0
+
+bbSqueeze = bbWidthPct < finalBbSqueeze
+emaGapAbs = math.abs(emaFast - emaSlow)
+emaFlat   = math.abs(emaGapAbs - emaGapAbs[5]) < atrVal * finalEmaFlatAtr
+adxWeakNow = adxVal < adxWeak
+
+chopBlock = useChopFilter and ((emaFlat and adxWeakNow) or (bbSqueeze and adxWeakNow))
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// STATE MACHINE + HARD GATE COUNTERS
+// pos: 0 flat, 1 long/CE, -1 short/PE
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var int pos = 0
+var float entryPrice = na
+var float hardSl = na
+var float highSince = na
+var float lowSince = na
+var bool protected = false
+var bool protectPrinted = false
+
+var int tradeCountToday = 0
+var int vLongCountToday = 0
+var int vShortCountToday = 0
+var int lastEntryBar = na
+var int lastExitBar = na
+
+if newDay or inReset
+    pos := 0
+    entryPrice := na
+    hardSl := na
+    highSince := na
+    lowSince := na
+    protected := false
+    protectPrinted := false
+    tradeCountToday := 0
+    vLongCountToday := 0
+    vShortCountToday := 0
+    lastEntryBar := na
+    lastExitBar := na
+
+barsSinceLastEntryOk = na(lastEntryBar) or bar_index - lastEntryBar >= minBarsBetweenTrades
+barsSinceLastExitOk  = na(lastExitBar) or bar_index - lastExitBar >= cooldownBarsAfterExit
+tradeCountOk         = tradeCountToday < maxTradesPerDay
+vLongCountOk         = vLongCountToday < maxVEntriesPerSide
+vShortCountOk        = vShortCountToday < maxVEntriesPerSide
+
+vBullEntry = vBullEntryRaw and vLongCountOk
+vBearEntry = vBearEntryRaw and vShortCountOk
+
+longRaw  = regularLongRaw or regularEmaBullReversal or vBullEntry
+shortRaw = regularShortRaw or regularEmaBearReversal or vBearEntry
+
+masterEntryGate =
+     sessionOk and
+     not chopBlock and
+     pos == 0 and
+     tradeCountOk and
+     barsSinceLastEntryOk and
+     barsSinceLastExitOk and
+     barstate.isconfirmed
+
+enterLong  = longRaw and masterEntryGate
+enterShort = shortRaw and masterEntryGate
+
+if enterLong
+    pos := 1
+    entryPrice := close
+    hardSl := close - atrVal * finalSlAtrMult
+    highSince := high
+    lowSince := low
+    protected := false
+    protectPrinted := false
+    tradeCountToday += 1
+    lastEntryBar := bar_index
+    if vBullEntry
+        vLongCountToday += 1
+
+if enterShort
+    pos := -1
+    entryPrice := close
+    hardSl := close + atrVal * finalSlAtrMult
+    highSince := high
+    lowSince := low
+    protected := false
+    protectPrinted := false
+    tradeCountToday += 1
+    lastEntryBar := bar_index
+    if vBearEntry
+        vShortCountToday += 1
+
+if pos == 1
+    highSince := math.max(nz(highSince, high), high)
+    if highSince - entryPrice >= finalProfitTrigger
+        protected := true
+
+if pos == -1
+    lowSince := math.min(nz(lowSince, low), low)
+    if entryPrice - lowSince >= finalProfitTrigger
+        protected := true
+
+protectLong  = pos == 1 and protected and not protectPrinted
+protectShort = pos == -1 and protected and not protectPrinted
+
+if protectLong or protectShort
+    protectPrinted := true
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// HTF CONTINUATION HOLD
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+longHtfContinuation =
+     pos == 1 and
+     htfBull and
+     close > htfEma and
+     emaFast > emaSlow
+
+shortHtfContinuation =
+     pos == -1 and
+     htfBear and
+     close < htfEma and
+     emaFast < emaSlow
+
+holdLong  = useHtfContinuationHold and longHtfContinuation
+holdShort = useHtfContinuationHold and shortHtfContinuation
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// FULL-TERM PREGNANCY BULGE EXIT BLOCK
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+emaBulgeGap = math.abs(emaFast - emaSlow)
+bulgeMature = emaBulgeGap >= atrVal * finalBulgeAtrMult
+
+int bulgeContractCount = 0
+for i = 0 to bulgeConfirmBars - 1
+    bulgeContractCount += emaBulgeGap[i] < emaBulgeGap[i + 1] ? 1 : 0
+
+bulgeContractConfirmed = bulgeContractCount >= bulgeConfirmBars
+
+longBulgeWeakness =
+     close < close[1] and
+     (not bulgeUseEma9Close or close < emaFast)
+
+shortBulgeWeakness =
+     close > close[1] and
+     (not bulgeUseEma9Close or close > emaFast)
+
+longBulgeExit =
+     useBulgeExit and
+     pos == 1 and
+     protected and
+     bulgeMature and
+     bulgeContractConfirmed and
+     longBulgeWeakness
+
+shortBulgeExit =
+     useBulgeExit and
+     pos == -1 and
+     protected and
+     bulgeMature and
+     bulgeContractConfirmed and
+     shortBulgeWeakness
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// EXIT CONDITIONS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+longHardSlExit  = pos == 1 and close <= hardSl
+shortHardSlExit = pos == -1 and close >= hardSl
+
+longEmergencyExit  = pos == 1 and close <= entryPrice - finalMaxLossPts
+shortEmergencyExit = pos == -1 and close >= entryPrice + finalMaxLossPts
+
+longHtfBreakExit  = pos == 1 and close < htfEma
+shortHtfBreakExit = pos == -1 and close > htfEma
+
+longEmaCrossExit  = pos == 1 and ta.crossunder(emaFast, emaSlow)
+shortEmaCrossExit = pos == -1 and ta.crossover(emaFast, emaSlow)
+
+longOppositeExit  = pos == 1 and regularShortRaw and sessionOk
+shortOppositeExit = pos == -1 and regularLongRaw and sessionOk
+
+exitLong = pos == 1 and barstate.isconfirmed and (
+     longHardSlExit or
+     longEmergencyExit or
+     longHtfBreakExit or
+     longEmaCrossExit or
+     longOppositeExit or
+     longBulgeExit or
+     inForceExit
+)
+
+exitShort = pos == -1 and barstate.isconfirmed and (
+     shortHardSlExit or
+     shortEmergencyExit or
+     shortHtfBreakExit or
+     shortEmaCrossExit or
+     shortOppositeExit or
+     shortBulgeExit or
+     inForceExit
+)
+
+if exitLong or exitShort
+    pos := 0
+    entryPrice := na
+    hardSl := na
+    highSince := na
+    lowSince := na
+    protected := false
+    protectPrinted := false
+    lastExitBar := bar_index
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SIGNAL MAPPING
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+buyCE  = isOptions and enterLong
+buyPE  = isOptions and enterShort
+exitCE = isOptions and exitLong
+exitPE = isOptions and exitShort
+
+buyFuture      = isFutures and enterLong
+sellFuture     = isFutures and enterShort
+exitBuyFuture  = isFutures and exitLong
+exitSellFuture = isFutures and exitShort
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// VISUALS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+plot(showEma ? emaFast : na, "EMA 9", color=color.lime, linewidth=2)
+plot(showEma ? emaSlow : na, "EMA 21", color=color.orange, linewidth=2)
+plot(showEma ? htfEma : na, "HTF EMA21", color=htfBull ? color.green : htfBear ? color.red : color.gray, linewidth=3)
+
+plot(pos != 0 ? hardSl : na, "Hard SL", color=color.yellow, linewidth=2, style=plot.style_linebr)
+
+bgcolor(showChopBg and chopBlock ? color.new(color.gray, 86) : na)
+
+plotshape(buyCE, title="BUY CE", style=shape.triangleup, location=location.belowbar, color=color.lime, text="BUY\nCE", textcolor=color.black, size=size.small)
+plotshape(buyPE, title="BUY PE", style=shape.triangledown, location=location.abovebar, color=color.red, text="BUY\nPE", textcolor=color.white, size=size.small)
+
+plotshape(exitCE, title="EXIT CE", style=shape.xcross, location=location.abovebar, color=color.purple, text="EXIT\nCE", textcolor=color.white, size=size.small)
+plotshape(exitPE, title="EXIT PE", style=shape.xcross, location=location.belowbar, color=color.orange, text="EXIT\nPE", textcolor=color.black, size=size.small)
+
+plotshape(buyFuture, title="BUY FUTURE", style=shape.triangleup, location=location.belowbar, color=color.lime, text="BUY\nFUT", textcolor=color.black, size=size.small)
+plotshape(sellFuture, title="SELL FUTURE", style=shape.triangledown, location=location.abovebar, color=color.red, text="SELL\nFUT", textcolor=color.white, size=size.small)
+
+plotshape(exitBuyFuture, title="EXIT BUY FUTURE", style=shape.xcross, location=location.abovebar, color=color.purple, text="EXIT\nBUY", textcolor=color.white, size=size.small)
+plotshape(exitSellFuture, title="EXIT SELL FUTURE", style=shape.xcross, location=location.belowbar, color=color.orange, text="EXIT\nSELL", textcolor=color.black, size=size.small)
+
+plotshape(protectLong, title="Long/CE Protected", style=shape.labelup, location=location.belowbar, color=color.blue, text="PROTECT", textcolor=color.white, size=size.tiny)
+plotshape(protectShort, title="Short/PE Protected", style=shape.labeldown, location=location.abovebar, color=color.blue, text="PROTECT", textcolor=color.white, size=size.tiny)
+
+plotshape(showBulgeExitMark and longBulgeExit, title="Long/CE Full-Term Bulge Exit", style=shape.flag, location=location.abovebar, color=color.purple, text="BULGE\nEXIT", textcolor=color.white, size=size.tiny)
+plotshape(showBulgeExitMark and shortBulgeExit, title="Short/PE Full-Term Bulge Exit", style=shape.flag, location=location.belowbar, color=color.orange, text="BULGE\nEXIT", textcolor=color.black, size=size.tiny)
+
+plotshape(showHoldDots and holdLong, title="Long/CE HTF Hold", style=shape.circle, location=location.belowbar, color=color.new(color.green, 65), size=size.tiny)
+plotshape(showHoldDots and holdShort, title="Short/PE HTF Hold", style=shape.circle, location=location.abovebar, color=color.new(color.red, 65), size=size.tiny)
+
+plotshape(showVSignals and vBullEntry and pos == 0, title="Bullish V Reversal", style=shape.diamond, location=location.belowbar, color=color.aqua, text="V\nLONG", textcolor=color.black, size=size.tiny)
+plotshape(showVSignals and vBearEntry and pos == 0, title="Bearish V Reversal", style=shape.diamond, location=location.abovebar, color=color.fuchsia, text="V\nSHORT", textcolor=color.white, size=size.tiny)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// DASHBOARD
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+var table dash = table.new(position.top_right, 2, 14, border_width=1)
+
+if showDashboard and barstate.islast
+    modeText = assetMode + " " + productMode
+    posText = pos == 1 ? (isOptions ? "CE ACTIVE" : "LONG FUTURE") : pos == -1 ? (isOptions ? "PE ACTIVE" : "SHORT FUTURE") : "FLAT"
+    htfText = htfBull ? "HTF BULL" : htfBear ? "HTF BEAR" : "HTF SIDEWAYS"
+    holdText = holdLong or holdShort ? "HTF HOLD" : "EXIT NORMAL"
+    chopText = chopBlock ? "BLOCKED" : "CLEAR"
+    protText = protected ? "PROTECTED" : "WAIT"
+    vText = vBullEntry ? "V BULL" : vBearEntry ? "V BEAR" : "WAIT"
+    bulgeText = longBulgeExit ? "LONG BULGE EXIT" : shortBulgeExit ? "SHORT BULGE EXIT" : bulgeMature ? "MATURE" : "WAIT"
+    gateText = tradeCountOk and barsSinceLastEntryOk and barsSinceLastExitOk ? "OPEN" : "LOCKED"
+
+    table.cell(dash, 0, 0, "SN v2.2", text_color=color.white, bgcolor=color.black)
+    table.cell(dash, 1, 0, modeText, text_color=color.white, bgcolor=color.black)
+
+    table.cell(dash, 0, 1, "Position", text_color=color.white)
+    table.cell(dash, 1, 1, posText, text_color=color.white, bgcolor=pos == 1 ? color.green : pos == -1 ? color.red : color.gray)
+
+    table.cell(dash, 0, 2, "HTF Bias", text_color=color.white)
+    table.cell(dash, 1, 2, htfText, text_color=color.white, bgcolor=htfBull ? color.green : htfBear ? color.red : color.gray)
+
+    table.cell(dash, 0, 3, "Hold Mode", text_color=color.white)
+    table.cell(dash, 1, 3, holdText, text_color=color.white, bgcolor=holdText == "HTF HOLD" ? color.blue : color.gray)
+
+    table.cell(dash, 0, 4, "Bulge Exit", text_color=color.white)
+    table.cell(dash, 1, 4, bulgeText, text_color=color.white, bgcolor=longBulgeExit or shortBulgeExit ? color.purple : bulgeMature ? color.orange : color.gray)
+
+    table.cell(dash, 0, 5, "V-Reversal", text_color=color.white)
+    table.cell(dash, 1, 5, vText, text_color=color.white, bgcolor=vBullEntry ? color.green : vBearEntry ? color.red : color.gray)
+
+    table.cell(dash, 0, 6, "Master Gate", text_color=color.white)
+    table.cell(dash, 1, 6, gateText, text_color=color.white, bgcolor=gateText == "OPEN" ? color.green : color.red)
+
+    table.cell(dash, 0, 7, "Trades Today", text_color=color.white)
+    table.cell(dash, 1, 7, str.tostring(tradeCountToday) + "/" + str.tostring(maxTradesPerDay), text_color=color.white)
+
+    table.cell(dash, 0, 8, "V Long/Short", text_color=color.white)
+    table.cell(dash, 1, 8, str.tostring(vLongCountToday) + "/" + str.tostring(vShortCountToday), text_color=color.white)
+
+    table.cell(dash, 0, 9, "Chop", text_color=color.white)
+    table.cell(dash, 1, 9, chopText, text_color=color.white, bgcolor=chopBlock ? color.red : color.green)
+
+    table.cell(dash, 0, 10, "Protection", text_color=color.white)
+    table.cell(dash, 1, 10, protText, text_color=color.white, bgcolor=protected ? color.blue : color.gray)
+
+    table.cell(dash, 0, 11, "RSI", text_color=color.white)
+    table.cell(dash, 1, 11, str.tostring(rsiVal, "#.##"), text_color=color.white)
+
+    table.cell(dash, 0, 12, "ADX", text_color=color.white)
+    table.cell(dash, 1, 12, str.tostring(adxVal, "#.##"), text_color=color.white)
+
+    table.cell(dash, 0, 13, "Hard SL", text_color=color.white)
+    table.cell(dash, 1, 13, na(hardSl) ? "NA" : str.tostring(hardSl, format.mintick), text_color=color.white)
+
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ALERTCONDITIONS
+//━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+alertcondition(buyCE, title="BUY CE", message="BUY CE")
+alertcondition(exitCE, title="EXIT CE", message="EXIT CE")
+alertcondition(buyPE, title="BUY PE", message="BUY PE")
+alertcondition(exitPE, title="EXIT PE", message="EXIT PE")
+
+alertcondition(buyFuture, title="BUY FUTURE", message="BUY FUTURE")
+alertcondition(exitBuyFuture, title="EXIT BUY FUTURE", message="EXIT BUY FUTURE")
+alertcondition(sellFuture, title="SELL FUTURE", message="SELL FUTURE")
+alertcondition(exitSellFuture, title="EXIT SELL FUTURE", message="EXIT SELL FUTURE")
+
+if buyCE
+    alert(buyCeMsg, alert.freq_once_per_bar_close)
+
+if exitCE
+    alert(exitCeMsg, alert.freq_once_per_bar_close)
+
+if buyPE
+    alert(buyPeMsg, alert.freq_once_per_bar_close)
+
+if exitPE
+    alert(exitPeMsg, alert.freq_once_per_bar_close)
+
+if buyFuture
+    alert(buyFutureMsg, alert.freq_once_per_bar_close)
+
+if exitBuyFuture
+    alert(exitBuyFutureMsg, alert.freq_once_per_bar_close)
+
+if sellFuture
+    alert(sellFutureMsg, alert.freq_once_per_bar_close)
+
+if exitSellFuture
+    alert(exitSellFutureMsg, alert.freq_once_per_bar_close)
